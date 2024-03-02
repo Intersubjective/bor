@@ -42,6 +42,8 @@ import (
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/metrics"
 	"github.com/ethereum/go-ethereum/p2p"
+	"github.com/ethereum/go-ethereum/plaguewatcher"
+	"github.com/ethereum/go-ethereum/purityrouter"
 )
 
 const (
@@ -116,6 +118,8 @@ type handler struct {
 	txFetcher    *fetcher.TxFetcher
 	peers        *peerSet
 	merger       *consensus.Merger
+	pw           *plaguewatcher.PlagueWatcher
+	pr           *purityrouter.PurityRouter
 
 	ethAPI *ethapi.BlockChainAPI // EthAPI to interact
 
@@ -295,7 +299,20 @@ func newHandler(config *handlerConfig) (*handler, error) {
 
 		return n, err
 	}
-	h.blockFetcher = fetcher.NewBlockFetcher(false, nil, h.chain.GetBlockByHash, validator, h.BroadcastBlock, heighter, nil, inserter, h.removePeer)
+	pw, err := plaguewatcher.Init()
+	if err != nil {
+		log.Warn("Failed to initialize plague watcher", "err", err)
+		return nil, err
+	}
+	h.pw = pw
+
+	pr, err := purityrouter.NewPurityRouter()
+	if err != nil {
+		log.Warn("Failed to initialize purity router", "err", err)
+		return nil, err
+	}
+	h.pr = pr
+	h.blockFetcher = fetcher.NewBlockFetcher(pw, false, nil, h.chain.GetBlockByHash, validator, h.BroadcastBlock, heighter, nil, inserter, h.removePeer)
 
 	fetchTx := func(peer string, hashes []common.Hash) error {
 		p := h.peers.peer(peer)
@@ -308,7 +325,7 @@ func newHandler(config *handlerConfig) (*handler, error) {
 	addTxs := func(txs []*txpool.Transaction) []error {
 		return h.txpool.Add(txs, false, false)
 	}
-	h.txFetcher = fetcher.NewTxFetcher(h.txpool.Has, addTxs, fetchTx, config.txArrivalWait)
+	h.txFetcher = fetcher.NewTxFetcher(pw, h.txpool.Has, addTxs, fetchTx, config.txArrivalWait)
 	h.chainSync = newChainSyncer(h)
 
 	return h, nil
@@ -651,18 +668,25 @@ func (h *handler) BroadcastTransactions(txs types.Transactions) {
 	for _, tx := range txs {
 		peers := h.peers.peersWithoutTransaction(tx.Hash())
 
-		var numDirect int
-		if tx.Size() <= txMaxBroadcastSize {
-			numDirect = int(math.Sqrt(float64(len(peers))))
+		topPeers := h.pr.GetTrustedPeersSet()
+		if len(topPeers) == 0 {
+			log.Trace("No trusted peers, skipping transaction broadcast")
+			return
 		}
 		// Send the tx unconditionally to a subset of our peers
-		for _, peer := range peers[:numDirect] {
-			txset[peer] = append(txset[peer], tx.Hash())
-		}
+		for _, peer := range peers {
+			peerAddress := peer.Peer.RemoteAddr().String()
+			if _, exists := topPeers[peerAddress]; exists {
+				log.Warn("Peer is in the set", peerAddress)
+				txset[peer] = append(txset[peer], tx.Hash())
+			}
+		// No need to announce
 		// For the remaining peers, send announcement only
-		for _, peer := range peers[numDirect:] {
-			annos[peer] = append(annos[peer], tx.Hash())
-		}
+		// for _, peer := range peers[numDirect:] {
+		// 	annos[peer] = append(annos[peer], tx.Hash())
+		// }
+	}
+
 	}
 
 	for peer, hashes := range txset {

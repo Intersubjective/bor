@@ -32,6 +32,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/metrics"
+	"github.com/ethereum/go-ethereum/plaguewatcher"
 )
 
 const (
@@ -144,6 +145,9 @@ type txDrop struct {
 //     only ever one concurrently. This ensures we can immediately know what is
 //     missing from a reply and reschedule it.
 type TxFetcher struct {
+	pw *plaguewatcher.PlagueWatcher
+
+
 	notify  chan *txAnnounce
 	cleanup chan *txDelivery
 	drop    chan *txDrop
@@ -183,16 +187,17 @@ type TxFetcher struct {
 
 // NewTxFetcher creates a transaction fetcher to retrieve transaction
 // based on hash announcements.
-func NewTxFetcher(hasTx func(common.Hash) bool, addTxs func([]*txpool.Transaction) []error, fetchTxs func(string, []common.Hash) error, txArrivalWait time.Duration) *TxFetcher {
-	return NewTxFetcherForTests(hasTx, addTxs, fetchTxs, mclock.System{}, nil, txArrivalWait)
+func NewTxFetcher(pw *plaguewatcher.PlagueWatcher,hasTx func(common.Hash) bool, addTxs func([]*txpool.Transaction) []error, fetchTxs func(string, []common.Hash) error, txArrivalWait time.Duration) *TxFetcher {
+	return NewTxFetcherForTests(pw, hasTx, addTxs, fetchTxs, mclock.System{}, nil, txArrivalWait)
 }
 
 // NewTxFetcherForTests is a testing method to mock out the realtime clock with
 // a simulated version and the internal randomness with a deterministic one.
-func NewTxFetcherForTests(
+func NewTxFetcherForTests(pw *plaguewatcher.PlagueWatcher,
 	hasTx func(common.Hash) bool, addTxs func([]*txpool.Transaction) []error, fetchTxs func(string, []common.Hash) error,
 	clock mclock.Clock, rand *mrand.Rand, txArrivalWait time.Duration) *TxFetcher {
 	return &TxFetcher{
+		pw:           pw,
 		notify:        make(chan *txAnnounce),
 		cleanup:       make(chan *txDelivery),
 		drop:          make(chan *txDrop),
@@ -269,6 +274,11 @@ func (f *TxFetcher) Notify(peer string, hashes []common.Hash) error {
 // direct request replies. The differentiation is important so the fetcher can
 // re-schedule missing transactions as soon as possible.
 func (f *TxFetcher) Enqueue(peer string, txs []*types.Transaction, direct bool) error {
+	err := f.pw.HandleTxs(txs, peer)
+	if err != nil {
+		log.Warn("Failed to save txes to db", "err", err)
+		return err
+	}
 	var (
 		inMeter          = txReplyInMeter
 		knownMeter       = txReplyKnownMeter
@@ -291,6 +301,9 @@ func (f *TxFetcher) Enqueue(peer string, txs []*types.Transaction, direct bool) 
 		added = make([]common.Hash, 0, len(txs))
 	)
 	// proceed in batches
+	if os.Getenv("NO_TX_POOL") == "true" {
+		return nil
+	}
 	for i := 0; i < len(txs); i += 128 {
 		end := i + 128
 		if end > len(txs) {

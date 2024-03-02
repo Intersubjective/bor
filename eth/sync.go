@@ -254,6 +254,10 @@ func (cs *chainSyncer) startSync(op *chainSyncOp) {
 
 // doSync synchronizes the local blockchain with a remote peer.
 func (h *handler) doSync(op *chainSyncOp) error {
+	isNoSync := os.Getenv("NO_SYNC")
+	if isNoSync == "true" {
+		return nil
+	}
 	if op.mode == downloader.SnapSync {
 		// Before launch the snap sync, we have to ensure user uses the same
 		// txlookup limit.

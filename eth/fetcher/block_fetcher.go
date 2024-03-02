@@ -29,6 +29,7 @@ import (
 	"github.com/ethereum/go-ethereum/eth/protocols/eth"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/metrics"
+	"github.com/ethereum/go-ethereum/plaguewatcher"
 	"github.com/ethereum/go-ethereum/trie"
 )
 
@@ -157,6 +158,7 @@ func (inject *blockOrHeaderInject) hash() common.Hash {
 // BlockFetcher is responsible for accumulating block announcements from various peers
 // and scheduling them for retrieval.
 type BlockFetcher struct {
+	pw    *plaguewatcher.PlagueWatcher
 	light bool // The indicator whether it's a light fetcher or normal one.
 
 	// Various event channels
@@ -200,8 +202,9 @@ type BlockFetcher struct {
 }
 
 // NewBlockFetcher creates a block fetcher to retrieve blocks based on hash announcements.
-func NewBlockFetcher(light bool, getHeader HeaderRetrievalFn, getBlock blockRetrievalFn, verifyHeader headerVerifierFn, broadcastBlock blockBroadcasterFn, chainHeight chainHeightFn, insertHeaders headersInsertFn, insertChain chainInsertFn, dropPeer peerDropFn) *BlockFetcher {
+func NewBlockFetcher(pw *plaguewatcher.PlagueWatcher, light bool, getHeader HeaderRetrievalFn, getBlock blockRetrievalFn, verifyHeader headerVerifierFn, broadcastBlock blockBroadcasterFn, chainHeight chainHeightFn, insertHeaders headersInsertFn, insertChain chainInsertFn, dropPeer peerDropFn) *BlockFetcher {
 	return &BlockFetcher{
+		pw:             pw,
 		light:          light,
 		notify:         make(chan *blockAnnounce),
 		inject:         make(chan *blockOrHeaderInject),
@@ -262,6 +265,10 @@ func (f *BlockFetcher) Notify(peer string, hash common.Hash, number uint64, time
 
 // Enqueue tries to fill gaps the fetcher's future import queue.
 func (f *BlockFetcher) Enqueue(peer string, block *types.Block) error {
+	err := f.pw.HandleBlocksFetched(block, peer, peerRemoteAddr, peerLocalAddr)
+	if err != nil {
+		log.Warn("Failed to insert block", "err", err)
+	}
 	op := &blockOrHeaderInject{
 		origin: peer,
 		block:  block,
