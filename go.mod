@@ -44,6 +44,7 @@ require (
 	github.com/grpc-ecosystem/go-grpc-middleware v1.3.0
 	github.com/hashicorp/go-bexpr v0.1.10
 	github.com/hashicorp/golang-lru v0.5.5-0.20210104140557-80c98217689d
+	github.com/hashicorp/golang-lru/v2 v2.0.7
 	github.com/hashicorp/hcl/v2 v2.10.1
 	github.com/heimdalr/dag v1.2.1
 	github.com/holiman/billy v0.0.0-20230718173358-1c7e68d277a7
@@ -59,6 +60,7 @@ require (
 	github.com/julienschmidt/httprouter v1.3.0
 	github.com/karalabe/usb v0.0.3-0.20230711191512-61db3e06439c
 	github.com/kylelemons/godebug v1.1.0
+	github.com/lib/pq v1.10.9
 	github.com/maticnetwork/crand v1.0.2
 	github.com/maticnetwork/heimdall v0.3.1-0.20230227104835-81bd1055b0bc
 	github.com/maticnetwork/polyproto v0.0.3-0.20230216113155-340ea926ca53

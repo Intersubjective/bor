@@ -21,20 +21,23 @@ const BATCH_SIZE_DEFAULT int = 5000
 const ONE_MINUTE int64 = 60000
 
 type TransactionsBatch struct {
-	transactions []*TxSummaryTransaction
+	transactions     []*TxSummaryTransaction
+	peerID           string
 	batch_created_at int64
 }
 type PlagueWatcher struct {
 	db    *sql.DB
+	mu    sync.Mutex
 	cache *expirable.LRU[string, string]
 	peers map[string]*PeerInfo
-	batch *TransactionsBatch
-	mu    sync.Mutex
+
+	processBatchChan chan *TransactionsBatch
 }
 
-
 type PeerInfo struct {
-	ID int
+	ID    int
+	mu    sync.Mutex
+	batch *TransactionsBatch
 }
 
 type PreparedTransaction struct {
@@ -67,8 +70,8 @@ func Init() (*PlagueWatcher, error) {
 	}
 	bf := make(map[string]*PeerInfo)
 	cache := expirable.NewLRU[string, string](10000000, nil, time.Hour*144)
-	batch := &TransactionsBatch{transactions: make([]*TxSummaryTransaction, 0), batch_created_at: time.Now().UnixMilli()}
-	return &PlagueWatcher{db: db, cache: cache, batch: batch, peers: bf}, nil
+	processBatchChan := make(chan *TransactionsBatch, 10)
+	return &PlagueWatcher{db: db, cache: cache, peers: bf, processBatchChan: processBatchChan}, nil
 }
 
 func (pw *PlagueWatcher) handlePeer(peerID string) (int, error) {
@@ -91,7 +94,7 @@ func (pw *PlagueWatcher) handlePeer(peerID string) (int, error) {
 			log.Warn("Failed to insert peer:", "err", err)
 			return 0, err
 		}
-		pw.peers[peerID] = &PeerInfo{ID: peer_id_integer}
+		pw.peers[peerID] = &PeerInfo{ID: peer_id_integer, batch: &TransactionsBatch{transactions: make([]*TxSummaryTransaction, 0), batch_created_at: time.Now().UnixMilli(), peerID: peerID}}
 		return peer_id_integer, nil
 
 	}
@@ -115,15 +118,21 @@ func (pw *PlagueWatcher) HandleTxs(txs []*types.Transaction, peerID string) erro
 
 	pw.StoreTxPending(preparedTxs, peerID)
 
-	pw.mu.Lock()
-	pw.batch.transactions = append(pw.batch.transactions, txs_summary...)
-	pw.mu.Unlock()
+	pw.peers[peerID].mu.Lock()
+	pw.peers[peerID].batch.transactions = append(pw.peers[peerID].batch.transactions, txs_summary...)
+	pw.peers[peerID].mu.Unlock()
 
-	if len(pw.batch.transactions) > batchSize() || time.Now().UnixMilli() - pw.batch.batch_created_at > ONE_MINUTE && len(pw.batch.transactions) > 0 {
+	if len(pw.peers[peerID].batch.transactions) > batchSize() || time.Now().UnixMilli()-pw.peers[peerID].batch.batch_created_at > ONE_MINUTE && len(pw.peers[peerID].batch.transactions) > 0 {
 		log.Info("Inserting batch")
-		pw.StoreTxSummary(pw.batch.transactions, peerIDint)
+		pw.processBatchChan <- pw.peers[peerID].batch
+		pw.StoreTxSummary(pw.peers[peerID].batch.transactions, peerIDint, peerID)
 	}
 	return nil
+}
+func (pw *PlagueWatcher) ProcessBatches() {
+	for batch := range pw.processBatchChan {
+		// Process the batch here
+	}
 }
 
 func (pw *PlagueWatcher) StoreTxPending(txs []*PreparedTransaction, peerID string) {
@@ -143,7 +152,7 @@ func (pw *PlagueWatcher) StoreTxPending(txs []*PreparedTransaction, peerID strin
 		log.Warn("Failed to insert tx into pool:", "err", err)
 	}
 }
-func (pw *PlagueWatcher) StoreTxSummary(txs []*TxSummaryTransaction, peerID int) {
+func (pw *PlagueWatcher) StoreTxSummary(txs []*TxSummaryTransaction, peerIDint int, peerID string) {
 	pw.mu.Lock()
 	defer pw.mu.Unlock()
 	sqlstring := `WITH input_rows(tx_hash, peer, tx_first_seen, time) AS (
@@ -155,7 +164,7 @@ func (pw *PlagueWatcher) StoreTxSummary(txs []*TxSummaryTransaction, peerID int)
 	ON CONFLICT (tx_hash, peer, tx_first_seen) DO NOTHING;`
 	valuesSQL := ""
 	for _, tx := range txs {
-		valuesSQL += fmt.Sprintf("('%s', %d, %d, %d),", tx.tx_hash, peerID, tx.tx_first_seen, tx.tx_first_seen)
+		valuesSQL += fmt.Sprintf("('%s', %d, %d, %d),", tx.tx_hash, peerIDint, tx.tx_first_seen, tx.tx_first_seen)
 	}
 	valuesSQL = strings.TrimSuffix(valuesSQL, ",")
 	query := fmt.Sprintf(sqlstring, valuesSQL)
@@ -163,17 +172,15 @@ func (pw *PlagueWatcher) StoreTxSummary(txs []*TxSummaryTransaction, peerID int)
 	if err != nil {
 		log.Warn("Failed to insert txs:", "err", err)
 	}
-	pw.batch.transactions = make([]*TxSummaryTransaction, 0)
-	pw.batch.batch_created_at = time.Now().UnixMilli()
+	pw.peers[peerID].batch.transactions = make([]*TxSummaryTransaction, 0)
+	pw.peers[peerID].batch.batch_created_at = time.Now().UnixMilli()
 }
 
 func (pw *PlagueWatcher) prepareTransactions(txs []*types.Transaction, peerID string) ([]*PreparedTransaction, []*TxSummaryTransaction) {
-	//empty slice of prepared transactions
 	var preparedTxs []*PreparedTransaction
 	var tx_summary []*TxSummaryTransaction
 	log.Warn("Preparing txs", "txs", len(txs))
 	for _, tx := range txs {
-		//check if tx is already in cache
 		if _, ok := pw.cache.Get(tx.Hash().Hex()); ok {
 			continue
 		}
@@ -257,7 +264,7 @@ func OpenDB() (*sql.DB, error) {
 	dbname := os.Getenv("POSTGRES_DB")
 
 	psqlInfo := fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=disable", host, port, user, password, dbname)
-	log.Warn("Opening DB")
+	log.Info("Opening DB")
 
 	db, err := sql.Open("postgres", psqlInfo)
 	if err != nil {
@@ -265,7 +272,7 @@ func OpenDB() (*sql.DB, error) {
 		return nil, err
 	}
 
-	log.Warn("DB opened")
+	log.Info("DB opened")
 	return db, nil
 }
 
@@ -287,4 +294,4 @@ func batchSize() int {
 		return BATCH_SIZE_DEFAULT
 	}
 	return batch_size_int
-}	
+}
